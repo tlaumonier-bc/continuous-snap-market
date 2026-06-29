@@ -5,12 +5,22 @@ keeps notebooks short: define the experiment once, then compare every model on i
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Iterable
 
 from .features import Features
 from .model import Model
 from .parameters import SharedParameters
 from .registry import available_model_names, build_model
+
+
+def common_evaluation_start(models: Iterable[Model]) -> int:
+    """First second every model can be evaluated out-of-sample.
+
+    Models calibrated differently become valid at different dates (a fixed split versus a
+    trailing window). Evaluating from this common start, with identical windows and seeds,
+    keeps house edge and attacker edge directly comparable across models.
+    """
+    return max((model.first_evaluation_index for model in models), default=0)
 
 
 def run_across_models(model_names: list[str] | None, features: Features,
