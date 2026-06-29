@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from .data import PriceSeries
+from .parameters import SharedParameters
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600  # 31_557_600
 
@@ -59,16 +60,18 @@ def _position_in_recent_range(price, window_seconds):
     return np.where(span > 0, (price - lowest) / span, 0.5)
 
 
-def build_features(prices: PriceSeries, parameters) -> Features:
-    """Build every per-second feature from a PriceSeries given the model parameters."""
+def build_features(prices: PriceSeries, parameters: SharedParameters) -> Features:
+    """Build every per-second feature from a PriceSeries given the shared parameters."""
     log_price = prices.log_price
     number_of_seconds = prices.number_of_seconds
     lookback = parameters.momentum_lookback_seconds
 
-    # per-second realised volatility (EWMA of squared log-returns)
+    # per-second realised volatility (exponentially weighted moving average of squared log-returns)
     squared_log_return = np.diff(log_price, prepend=log_price[0]) ** 2
-    ewma_variance = pd.Series(squared_log_return).ewm(span=parameters.volatility_ewma_span, adjust=False).mean().values
-    per_second_volatility = np.sqrt(ewma_variance) + 1e-12
+    exponentially_weighted_moving_average_variance = pd.Series(squared_log_return).ewm(
+        span=parameters.volatility_exponentially_weighted_moving_average_span, adjust=False
+    ).mean().values
+    per_second_volatility = np.sqrt(exponentially_weighted_moving_average_variance) + 1e-12
     annualized_volatility = per_second_volatility * np.sqrt(SECONDS_PER_YEAR)
 
     # volatility-normalised momentum state
@@ -107,7 +110,7 @@ def build_features(prices: PriceSeries, parameters) -> Features:
     )
 
 
-def contract_entries(number_of_seconds: int, parameters) -> np.ndarray:
+def contract_entries(number_of_seconds: int, parameters: SharedParameters) -> np.ndarray:
     """Non-overlapping contract entry indices, starting after the warmup."""
     return np.arange(parameters.warmup_seconds, number_of_seconds - parameters.horizon_seconds,
                      parameters.horizon_seconds)
