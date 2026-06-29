@@ -46,6 +46,81 @@ class SimulationResult:
     per_bettor: dict
     net_delta_series: np.ndarray = field(repr=False)
     pnl_series: np.ndarray = field(repr=False)
+    risk_margin_series: np.ndarray = field(repr=False)
+
+
+def _house_profit_vector(up, down, odds_up, odds_down, strike_price, settlement_price):
+    return np.where(
+        settlement_price > strike_price,
+        down - up * (odds_up - 1.0),
+        np.where(settlement_price < strike_price, up - down * (odds_down - 1.0), 0.0),
+    )
+
+
+def book_risk_margin(model: Model, features: Features, start_index: int, step: int,
+                     total_up, total_down, odds_up_recorded, odds_down_recorded) -> float:
+    """Extra margin from live-book loss-at-risk and near-expiry ATM concentration."""
+    parameters = model.parameters
+    if not model.use_book_risk_margin:
+        return 0.0
+
+    horizon = parameters.horizon_seconds
+    open_start = max(0, step - horizon + 1)
+    if open_start >= step:
+        return 0.0
+
+    open_steps = np.arange(open_start, step)
+    open_up = total_up[open_steps]
+    open_down = total_down[open_steps]
+    live = (open_up + open_down) > 1e-12
+    if not live.any():
+        return 0.0
+
+    open_steps = open_steps[live]
+    open_up = open_up[live]
+    open_down = open_down[live]
+    odds_up = odds_up_recorded[open_steps]
+    odds_down = odds_down_recorded[open_steps]
+
+    now = start_index + step
+    entry_times = start_index + open_steps
+    strike_price = features.price[entry_times]
+    current_price = features.price[now]
+    remaining = np.maximum(horizon - (step - open_steps), 1)
+    current_volatility = max(float(features.per_second_volatility[now]), 1e-12)
+
+    stress_losses = []
+    for multiplier in parameters.stress_sigma_multipliers:
+        settlement_price = current_price * np.exp(
+            multiplier * current_volatility * np.sqrt(remaining)
+        )
+        profit = _house_profit_vector(open_up, open_down, odds_up, odds_down,
+                                      strike_price, settlement_price).sum()
+        stress_losses.append(max(0.0, -float(profit)))
+    loss_at_risk = max(stress_losses) if stress_losses else 0.0
+
+    scale = parameters.maximum_net_delta
+    book_margin = (
+        parameters.book_risk_margin_sensitivity
+        * loss_at_risk
+        / (loss_at_risk + scale)
+        if loss_at_risk > 0 else 0.0
+    )
+
+    distance = np.abs(np.log(current_price / strike_price))
+    sigma_distance = current_volatility * np.sqrt(remaining)
+    atm_weight = np.exp(-0.5 * (distance / np.maximum(sigma_distance, 1e-12)) ** 2)
+    time_weight = 1.0 / np.sqrt(remaining)
+    gamma_notional = float(((open_up + open_down) * atm_weight * time_weight).sum())
+    gamma_margin = (
+        parameters.terminal_gamma_margin_sensitivity
+        * gamma_notional
+        / (gamma_notional + scale)
+        if gamma_notional > 0 else 0.0
+    )
+
+    headroom = parameters.maximum_total_margin - model.margin_at(now)
+    return float(np.clip(book_margin + gamma_margin, 0.0, max(0.0, headroom)))
 
 
 def simulate(model: Model, features: Features, bettors: dict[str, Callable],
@@ -72,6 +147,7 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
     open_up_exposure = open_down_exposure = house_pnl = 0.0
     net_delta_series = np.empty(number_of_steps)
     pnl_series = np.empty(number_of_steps)
+    risk_margin_series = np.zeros(number_of_steps)
     refused_seconds = 0
     results = {name: BettorResult() for name in names}
 
@@ -106,7 +182,9 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
             (open_up_exposure - open_down_exposure)
             / (open_up_exposure + open_down_exposure + parameters.maximum_net_delta)
         )
-        odds_up, odds_down = model.quote(now, net_delta_imbalance)
+        extra_margin = book_risk_margin(model, features, start_index, step, total_up, total_down,
+                                        odds_up_recorded, odds_down_recorded)
+        odds_up, odds_down = model.quote(now, net_delta_imbalance, extra_margin=extra_margin)
 
         # collect every bettor's flow for this second
         this_up = {name: 0.0 for name in names}
@@ -139,6 +217,7 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
         open_down_exposure += total_down[step]
         net_delta_series[step] = open_up_exposure - open_down_exposure
         pnl_series[step] = house_pnl
+        risk_margin_series[step] = extra_margin
 
     total_volume = total_up.sum() + total_down.sum()
     return SimulationResult(
@@ -150,6 +229,7 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
         per_bettor=results,
         net_delta_series=net_delta_series,
         pnl_series=pnl_series,
+        risk_margin_series=risk_margin_series,
     )
 
 
