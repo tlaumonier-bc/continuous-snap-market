@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...features import Features
+from ...features import Features, contract_entries
 from ...model import BookRiskParameters, Model
 from ...parameters import SharedParameters
 from ...registry import ModelSpecification, register_model
@@ -16,6 +16,16 @@ from .internal_probability import build_internal_probability
 from .parameters import HiddenSymmetricMarginParameters
 
 MODEL_NAME = "hidden_symmetric_margin"
+
+
+def _first_priced_second(features: Features, shared_parameters: SharedParameters,
+                         parameters: HiddenSymmetricMarginParameters) -> int:
+    """First second the walk-forward internal estimator prices its information margin."""
+    entries = contract_entries(features.number_of_seconds, shared_parameters)
+    minimum = min(parameters.internal_minimum_training_contracts, len(entries))
+    if minimum >= len(entries):
+        return features.number_of_seconds
+    return int(entries[minimum])
 
 
 def _book_risk_parameters(parameters: HiddenSymmetricMarginParameters) -> BookRiskParameters | None:
@@ -52,6 +62,8 @@ def build(features: Features, shared_parameters: SharedParameters,
         internal_probability=internal_probability,
         margin_components={"information": information_margin},
         book_risk_parameters=_book_risk_parameters(model_parameters),
+        first_evaluation_index=_first_priced_second(features, shared_parameters, model_parameters)
+        if rolling else 0,
     )
 
 
