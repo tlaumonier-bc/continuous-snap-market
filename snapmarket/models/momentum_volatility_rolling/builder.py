@@ -1,9 +1,8 @@
-"""The rolling momentum-lookup model.
+"""The rolling momentum-and-volatility model.
 
-Identical calibration to the static momentum-lookup model, applied walk-forward: at each
-recompute point, calibrate the fair-price curve on the trailing window of contracts, then
-display that curve until the next recompute. Out-of-sample begins only once a full window
-of history is available, which `first_evaluation_index` records.
+An improved momentum-lookup: it calibrates one momentum curve per volatility regime,
+recomputed walk-forward on a trailing window. This prices the regime dependence that the
+single-curve model ignores, closing the gap a regime-aware attacker exploits.
 """
 from __future__ import annotations
 
@@ -13,24 +12,19 @@ from ...features import Features, contract_entries
 from ...model import Model
 from ...parameters import SharedParameters
 from ...registry import ModelSpecification, register_model
-from ..momentum_lookup.calibration import calibrate_fair_probability
 from ..rolling import contract_up_outcomes, seconds_to_contracts, walk_forward_segments
-from .parameters import MomentumLookupRollingParameters
+from .calibration import apply_regime_curves, calibrate_regime_curves
+from .parameters import MomentumVolatilityRollingParameters
 
-MODEL_NAME = "momentum_lookup_rolling"
-
-
-def _apply_lookup(momentum_segment: np.ndarray, bin_edges: np.ndarray,
-                  probability_per_bin: np.ndarray) -> np.ndarray:
-    index = np.clip(np.digitize(momentum_segment, bin_edges) - 1,
-                    0, len(probability_per_bin) - 1)
-    return probability_per_bin[index]
+MODEL_NAME = "momentum_volatility_rolling"
 
 
 def build(features: Features, shared_parameters: SharedParameters,
-          model_parameters: MomentumLookupRollingParameters) -> Model:
+          model_parameters: MomentumVolatilityRollingParameters) -> Model:
     horizon = shared_parameters.horizon_seconds
     momentum = features.standardized_momentum
+    volatility = features.annualized_volatility
+    volatility_bin_count = model_parameters.volatility_bin_count
     entries = contract_entries(features.number_of_seconds, shared_parameters)
     outcomes = contract_up_outcomes(features, entries, shared_parameters)
 
@@ -42,11 +36,14 @@ def build(features: Features, shared_parameters: SharedParameters,
 
     for training_slice, segment_start, segment_stop in walk_forward_segments(
             entries, window_contracts, recompute_contracts, features.number_of_seconds):
-        bin_edges, probability_per_bin = calibrate_fair_probability(
-            momentum[entries[training_slice]], outcomes[training_slice], model_parameters,
+        training_entries = entries[training_slice]
+        curves = calibrate_regime_curves(
+            momentum[training_entries], volatility[training_entries],
+            outcomes[training_slice], volatility_bin_count, model_parameters,
         )
-        display_probability[segment_start:segment_stop] = _apply_lookup(
-            momentum[segment_start:segment_stop], bin_edges, probability_per_bin,
+        display_probability[segment_start:segment_stop] = apply_regime_curves(
+            momentum[segment_start:segment_stop], volatility[segment_start:segment_stop],
+            volatility[training_entries], volatility_bin_count, curves,
         )
         first_evaluation_index = min(first_evaluation_index, segment_start)
 
@@ -61,7 +58,7 @@ def build(features: Features, shared_parameters: SharedParameters,
 
 register_model(ModelSpecification(
     name=MODEL_NAME,
-    description="Momentum-lookup calibration recomputed walk-forward on a trailing window.",
-    default_parameters=MomentumLookupRollingParameters,
+    description="Momentum lookup calibrated per volatility regime, recomputed walk-forward.",
+    default_parameters=MomentumVolatilityRollingParameters,
     build=build,
 ))

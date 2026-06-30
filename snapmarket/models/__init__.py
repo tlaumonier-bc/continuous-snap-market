@@ -16,7 +16,13 @@ from ..registry import (
     get_model_specification,
     register_model,
 )
-from . import hidden_symmetric_margin, momentum_lookup, momentum_lookup_rolling
+from . import (
+    hidden_symmetric_margin,
+    momentum_logistic_rolling,
+    momentum_lookup,
+    momentum_lookup_rolling,
+    momentum_volatility_rolling,
+)
 
 __all__ = [
     "ModelSpecification",
@@ -26,5 +32,7 @@ __all__ = [
     "register_model",
     "momentum_lookup",
     "momentum_lookup_rolling",
+    "momentum_volatility_rolling",
+    "momentum_logistic_rolling",
     "hidden_symmetric_margin",
 ]

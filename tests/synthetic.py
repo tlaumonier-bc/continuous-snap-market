@@ -6,7 +6,9 @@ import numpy as np
 from snapmarket.data import PriceSeries
 from snapmarket.features import build_features
 from snapmarket.models.hidden_symmetric_margin import HiddenSymmetricMarginParameters
+from snapmarket.models.momentum_logistic_rolling import MomentumLogisticRollingParameters
 from snapmarket.models.momentum_lookup_rolling import MomentumLookupRollingParameters
+from snapmarket.models.momentum_volatility_rolling import MomentumVolatilityRollingParameters
 from snapmarket.parameters import SharedParameters
 
 
@@ -31,6 +33,26 @@ def fast_rolling_parameters() -> MomentumLookupRollingParameters:
         recompute_every_seconds=300,        # 10 contracts
         calibration_bin_count=4,
         minimum_samples_per_bin=2,
+    )
+
+
+def fast_momentum_volatility_parameters() -> MomentumVolatilityRollingParameters:
+    return MomentumVolatilityRollingParameters(
+        calibration_window_seconds=900,     # 30 contracts at a 30-second horizon
+        recompute_every_seconds=300,        # 10 contracts
+        volatility_bin_count=2,
+        calibration_bin_count=3,
+        minimum_samples_per_bin=2,
+    )
+
+
+def fast_momentum_logistic_parameters() -> MomentumLogisticRollingParameters:
+    return MomentumLogisticRollingParameters(
+        minimum_training_contracts=50,
+        training_window_contracts=100,
+        retrain_contracts=50,
+        logistic_iterations=10,
+        minimum_samples_per_fit=10,
     )
 
 
