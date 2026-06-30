@@ -1,0 +1,7 @@
+model,attacker,edge,share
+momentum + volatility,predictive (logistic),-0.040355237591153836,0.05457616704354154
+momentum + volatility,lead-lag (fast feed),-0.17179063310647838,0.5001710369465473
+momentum + volatility,regime-aware,0.029650086010316486,0.05492294212064891
+hidden margin (model 3),predictive (logistic),-0.489677593103708,3.869888042510717e-06
+hidden margin (model 3),lead-lag (fast feed),-0.1803021445775945,0.5001710369465473
+hidden margin (model 3),regime-aware,0.035404194609474575,0.1587513819284836

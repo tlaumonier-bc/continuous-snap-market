@@ -38,6 +38,7 @@ class Model:
     internal_probability: np.ndarray | None = None
     margin_components: dict[str, object] = field(default_factory=dict)
     book_risk_parameters: BookRiskParameters | None = None
+    first_evaluation_index: int = 0                 # first second whose quote is out-of-sample
 
     @property
     def uses_book_risk_margin(self) -> bool:

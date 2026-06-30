@@ -1,0 +1,10 @@
+model,attacker,edge
+volatility_regime_momentum,predictive (logistic),-0.040355237591153836
+volatility_regime_momentum,lead-lag (fast feed),-0.17179063310647838
+volatility_regime_momentum,regime-aware,0.029650086010316486
+hidden margin (model 3),predictive (logistic),-0.489677593103708
+hidden margin (model 3),lead-lag (fast feed),-0.1803021445775945
+hidden margin (model 3),regime-aware,0.035404194609474575
+guarded (combined),predictive (logistic),-1.0
+guarded (combined),lead-lag (fast feed),-0.1789253718630071
+guarded (combined),regime-aware,0.028175337318914133

@@ -5,7 +5,13 @@ import numpy as np
 
 from snapmarket.data import PriceSeries
 from snapmarket.features import build_features
+from snapmarket.models.guarded_volatility_regime_momentum import (
+    GuardedVolatilityRegimeMomentumParameters,
+)
 from snapmarket.models.hidden_symmetric_margin import HiddenSymmetricMarginParameters
+from snapmarket.models.momentum_logistic_rolling import MomentumLogisticRollingParameters
+from snapmarket.models.momentum_lookup_rolling import MomentumLookupRollingParameters
+from snapmarket.models.volatility_regime_momentum import VolatilityRegimeMomentumParameters
 from snapmarket.parameters import SharedParameters
 
 
@@ -20,6 +26,43 @@ def fast_hidden_margin_parameters() -> HiddenSymmetricMarginParameters:
         internal_retrain_contracts=50,
         internal_logistic_iterations=10,
         minimum_samples_per_bin=10,
+    )
+
+
+def fast_rolling_parameters() -> MomentumLookupRollingParameters:
+    # Small window and cadence so the model rolls within the synthetic horizon.
+    return MomentumLookupRollingParameters(
+        calibration_window_seconds=900,     # 30 contracts at a 30-second horizon
+        recompute_every_seconds=300,        # 10 contracts
+        calibration_bin_count=4,
+        minimum_samples_per_bin=2,
+    )
+
+
+def fast_volatility_regime_momentum_parameters() -> VolatilityRegimeMomentumParameters:
+    return VolatilityRegimeMomentumParameters(
+        calibration_window_seconds=900,     # 30 contracts at a 30-second horizon
+        recompute_every_seconds=300,        # 10 contracts
+        volatility_bin_count=2,
+        calibration_bin_count=3,
+        minimum_samples_per_bin=2,
+    )
+
+
+def fast_momentum_logistic_parameters() -> MomentumLogisticRollingParameters:
+    return MomentumLogisticRollingParameters(
+        minimum_training_contracts=50,
+        training_window_contracts=100,
+        retrain_contracts=50,
+        logistic_iterations=10,
+        minimum_samples_per_fit=10,
+    )
+
+
+def fast_guarded_parameters() -> GuardedVolatilityRegimeMomentumParameters:
+    return GuardedVolatilityRegimeMomentumParameters(
+        display=fast_volatility_regime_momentum_parameters(),
+        guard=fast_hidden_margin_parameters(),
     )
 
 

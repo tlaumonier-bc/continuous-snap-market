@@ -4,6 +4,9 @@
 skew, net-delta cap) and isolates each bettor's PnL. Use it for house edge by flow type
 and for the "attacker inside a background pool" / capacity tests. It is model-agnostic:
 any model quotes through the same `Model.quote`.
+
+A bettor is `bettor(t, random_generator, odds_up, odds_down) -> (up_stake, down_stake)`.
+The current quoted odds are passed in so informed bettors can size on expected value.
 """
 from __future__ import annotations
 
@@ -52,7 +55,8 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
              start_index: int, number_of_steps: int, seed: int = 42) -> SimulationResult:
     """Run the live book for `number_of_steps` seconds from `start_index`.
 
-    `bettors` maps a name to a `bettor(t, random_generator) -> (up_stake, down_stake)`.
+    `bettors` maps a name to a
+    `bettor(t, random_generator, odds_up, odds_down) -> (up_stake, down_stake)`.
     All bettors are filled at the same odds each second (one quote off the shared book).
     Returns total house PnL/edge and each bettor's isolated PnL/edge.
     """
@@ -109,7 +113,7 @@ def simulate(model: Model, features: Features, bettors: dict[str, Callable],
         this_up = {name: 0.0 for name in names}
         this_down = {name: 0.0 for name in names}
         for name in names:
-            up_stake, down_stake = bettors[name](now, random_generator)
+            up_stake, down_stake = bettors[name](now, random_generator, odds_up, odds_down)
             this_up[name], this_down[name] = up_stake, down_stake
 
         # enforce the net-delta cap: refuse the crowded side across all bettors this second

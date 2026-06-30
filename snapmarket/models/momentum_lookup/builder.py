@@ -49,6 +49,8 @@ def build(features: Features, shared_parameters: SharedParameters,
         display_probability=display_probability,
         margin=shared_parameters.house_margin,
         shared_parameters=shared_parameters,
+        first_evaluation_index=int(entries[split_index]) if split_index < len(entries)
+        else features.number_of_seconds,
     )
 
 
