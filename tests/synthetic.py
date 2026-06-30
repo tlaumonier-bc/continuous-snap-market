@@ -5,6 +5,9 @@ import numpy as np
 
 from snapmarket.data import PriceSeries
 from snapmarket.features import build_features
+from snapmarket.models.guarded_volatility_regime_momentum import (
+    GuardedVolatilityRegimeMomentumParameters,
+)
 from snapmarket.models.hidden_symmetric_margin import HiddenSymmetricMarginParameters
 from snapmarket.models.momentum_logistic_rolling import MomentumLogisticRollingParameters
 from snapmarket.models.momentum_lookup_rolling import MomentumLookupRollingParameters
@@ -53,6 +56,13 @@ def fast_momentum_logistic_parameters() -> MomentumLogisticRollingParameters:
         retrain_contracts=50,
         logistic_iterations=10,
         minimum_samples_per_fit=10,
+    )
+
+
+def fast_guarded_parameters() -> GuardedVolatilityRegimeMomentumParameters:
+    return GuardedVolatilityRegimeMomentumParameters(
+        display=fast_volatility_regime_momentum_parameters(),
+        guard=fast_hidden_margin_parameters(),
     )
 
 

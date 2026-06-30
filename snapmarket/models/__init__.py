@@ -17,6 +17,7 @@ from ..registry import (
     register_model,
 )
 from . import (
+    guarded_volatility_regime_momentum,
     hidden_symmetric_margin,
     momentum_logistic_rolling,
     momentum_lookup,
@@ -34,5 +35,6 @@ __all__ = [
     "momentum_lookup_rolling",
     "volatility_regime_momentum",
     "momentum_logistic_rolling",
+    "guarded_volatility_regime_momentum",
     "hidden_symmetric_margin",
 ]
