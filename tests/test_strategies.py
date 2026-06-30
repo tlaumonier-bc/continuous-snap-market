@@ -8,6 +8,7 @@ from snapmarket.signals import (
     walk_forward_logistic_probability,
 )
 from snapmarket.strategies import (
+    demand_responsive_pool,
     lead_lag_bettor,
     noise_pool,
     predictive_bettor,
@@ -59,6 +60,20 @@ def test_lead_lag_bettor_follows_the_faster_feed():
     bettor = lead_lag_bettor(features, fast_log_price)
     up, down = bettor(100, _generator(), odds_up=1.9, odds_down=1.9)
     assert up > 0.0 and down == 0.0
+
+
+def test_demand_responsive_pool_grows_with_better_odds():
+    # Same seed isolates the elasticity: better odds (lower margin) must draw more volume.
+    good_odds = demand_responsive_pool(base_stake=100.0)(0, _generator(), 1.90, 1.90)  # margin ~0.05
+    bad_odds = demand_responsive_pool(base_stake=100.0)(0, _generator(), 1.50, 1.50)   # margin ~0.25
+    assert sum(good_odds) > sum(bad_odds)
+
+
+def test_demand_responsive_pool_matches_reference_at_reference_margin():
+    # At the reference margin the multiplier is 1, so it matches a plain noise pool with the same seed.
+    elastic = demand_responsive_pool(base_stake=100.0, reference_margin=0.125)(0, _generator(), 1.75, 1.75)
+    plain = noise_pool(base_stake=100.0)(0, _generator(), 1.75, 1.75)
+    assert np.allclose(elastic, plain, rtol=1e-3)
 
 
 def test_walk_forward_logistic_probability_is_a_valid_probability():

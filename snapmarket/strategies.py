@@ -11,6 +11,8 @@ zero. Stakes are drawn inside the bettor, so each bettor sizes its own flow.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 # --------------------------------------------------------------------------- #
@@ -22,6 +24,29 @@ def noise_pool(base_stake: float = 50.0, spread: float = 0.10):
     """Uninformed background flow: roughly balanced, small random up/down tilt each second."""
     def bettor(t, random_generator, odds_up, odds_down):
         amount = base_stake * random_generator.exponential(1.0)
+        up_fraction = float(np.clip(0.5 + random_generator.normal(0, spread), 0, 1))
+        return amount * up_fraction, amount * (1 - up_fraction)
+    return bettor
+
+
+def _offered_margin(odds_up: float, odds_down: float) -> float:
+    """Effective overround margin implied by a quote (0 = fair, higher = worse for the client)."""
+    overround = 1.0 / odds_up + 1.0 / odds_down
+    return 1.0 - 1.0 / overround
+
+
+def demand_responsive_pool(base_stake: float = 50.0, elasticity: float = 8.0,
+                           reference_margin: float = 0.125, spread: float = 0.10):
+    """Uninformed flow whose size reacts to how competitive the quoted odds are.
+
+    Volume scales by exp(-elasticity * (offered_margin - reference_margin)): tighter odds (lower
+    margin) draw more flow, wider odds draw less. At `reference_margin` the multiplier is 1, so the
+    pool matches `noise_pool`. This makes total volume elastic to pricing, which is what lets us
+    weigh extra arbitrage leakage against the extra volume that better odds bring in.
+    """
+    def bettor(t, random_generator, odds_up, odds_down):
+        multiplier = math.exp(-elasticity * (_offered_margin(odds_up, odds_down) - reference_margin))
+        amount = base_stake * multiplier * random_generator.exponential(1.0)
         up_fraction = float(np.clip(0.5 + random_generator.normal(0, spread), 0, 1))
         return amount * up_fraction, amount * (1 - up_fraction)
     return bettor
