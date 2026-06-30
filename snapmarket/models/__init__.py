@@ -21,7 +21,7 @@ from . import (
     momentum_logistic_rolling,
     momentum_lookup,
     momentum_lookup_rolling,
-    momentum_volatility_rolling,
+    volatility_regime_momentum,
 )
 
 __all__ = [
@@ -32,7 +32,7 @@ __all__ = [
     "register_model",
     "momentum_lookup",
     "momentum_lookup_rolling",
-    "momentum_volatility_rolling",
+    "volatility_regime_momentum",
     "momentum_logistic_rolling",
     "hidden_symmetric_margin",
 ]

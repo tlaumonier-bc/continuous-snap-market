@@ -13,7 +13,7 @@ SECONDS_PER_DAY = 86_400
 
 
 @dataclass(frozen=True)
-class MomentumVolatilityRollingParameters:
+class VolatilityRegimeMomentumParameters:
     # --- rolling schedule ---
     calibration_window_seconds: int = 90 * SECONDS_PER_DAY
     recompute_every_seconds: int = 7 * SECONDS_PER_DAY

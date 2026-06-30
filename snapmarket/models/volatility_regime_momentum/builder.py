@@ -14,13 +14,13 @@ from ...parameters import SharedParameters
 from ...registry import ModelSpecification, register_model
 from ..rolling import contract_up_outcomes, seconds_to_contracts, walk_forward_segments
 from .calibration import apply_regime_curves, calibrate_regime_curves
-from .parameters import MomentumVolatilityRollingParameters
+from .parameters import VolatilityRegimeMomentumParameters
 
-MODEL_NAME = "momentum_volatility_rolling"
+MODEL_NAME = "volatility_regime_momentum"
 
 
 def build(features: Features, shared_parameters: SharedParameters,
-          model_parameters: MomentumVolatilityRollingParameters) -> Model:
+          model_parameters: VolatilityRegimeMomentumParameters) -> Model:
     horizon = shared_parameters.horizon_seconds
     momentum = features.standardized_momentum
     volatility = features.annualized_volatility
@@ -59,6 +59,6 @@ def build(features: Features, shared_parameters: SharedParameters,
 register_model(ModelSpecification(
     name=MODEL_NAME,
     description="Momentum lookup calibrated per volatility regime, recomputed walk-forward.",
-    default_parameters=MomentumVolatilityRollingParameters,
+    default_parameters=VolatilityRegimeMomentumParameters,
     build=build,
 ))
