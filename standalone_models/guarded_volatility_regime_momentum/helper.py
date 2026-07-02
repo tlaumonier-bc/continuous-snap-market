@@ -20,7 +20,7 @@ import pandas as pd
 
 SECONDS_PER_YEAR = 365.25 * 24 * 3600
 _PROBABILITY_EPSILON = 1e-6
-_DEFAULT_DATA_SEARCH_PATHS = ("data", "../data", ".", "..")
+_DEFAULT_DATA_SEARCH_PATHS = ("data", "../data", "../../data", ".", "..")
 
 
 # --------------------------------------------------------------------------- #
@@ -36,7 +36,12 @@ class MarketParameters:
     inventory_skew_sensitivity: float = 3.0         # how hard a book imbalance skews the odds
     maximum_odds: float = 5.0                        # cap on decimal odds offered on either side
     maximum_total_margin: float = 0.49              # keeps quoted odds at or above roughly 1.0x
-    maximum_net_delta: float = 2.0e4                # hard cap on |net delta| (USDT)
+    # Inventory control. The skew responds to the *relative* imbalance, softened by a small
+    # constant so a near-empty book does not over-skew on the first ticket; it therefore engages
+    # at any volume. The cap is a separate absolute risk budget the operator scales with capital.
+    skew_softening: float = 1_000.0                 # small floor in the relative-imbalance denominator
+    maximum_net_delta: float = 2.0e4                # hard cap on |net delta| (USDT), a capital backstop
+    hedge_cost_bps: float = 1.0                      # cost per unit notional rebalanced when hedging
 
     @property
     def warmup_seconds(self) -> int:
@@ -233,17 +238,28 @@ def contract_outcomes(features: Features, entries: np.ndarray, parameters: Marke
 # --------------------------------------------------------------------------- #
 #  Pricing                                                                     #
 # --------------------------------------------------------------------------- #
-def quote_odds(display_probability, margin, net_delta_imbalance, parameters: MarketParameters):
-    """Decimal (odds_up, odds_down): skewed for inventory and clamped at each side's fair odds."""
+def quote_odds_two_sided(display_probability, margin_up, margin_down, net_delta_imbalance,
+                         parameters: MarketParameters):
+    """Decimal (odds_up, odds_down) with an independent margin on each side.
+
+    Skewed for inventory and clamped so no side is offered above its fair odds. A symmetric quote
+    just passes the same margin twice (see `quote_odds`); an asymmetric guard passes different ones.
+    """
     display_probability = float(np.clip(display_probability, _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON))
-    margin = float(np.clip(margin, 0.0, parameters.maximum_total_margin))
+    margin_up = float(np.clip(margin_up, 0.0, parameters.maximum_total_margin))
+    margin_down = float(np.clip(margin_down, 0.0, parameters.maximum_total_margin))
     fair_log_odds = math.log(display_probability / (1.0 - display_probability))
     skewed_up_probability = 1.0 / (1.0 + math.exp(
         -(fair_log_odds + parameters.inventory_skew_sensitivity * net_delta_imbalance)))
-    odds_up = min((1.0 - margin) / skewed_up_probability, 1.0 / display_probability, parameters.maximum_odds)
-    odds_down = min((1.0 - margin) / (1.0 - skewed_up_probability), 1.0 / (1.0 - display_probability),
+    odds_up = min((1.0 - margin_up) / skewed_up_probability, 1.0 / display_probability, parameters.maximum_odds)
+    odds_down = min((1.0 - margin_down) / (1.0 - skewed_up_probability), 1.0 / (1.0 - display_probability),
                     parameters.maximum_odds)
     return odds_up, odds_down
+
+
+def quote_odds(display_probability, margin, net_delta_imbalance, parameters: MarketParameters):
+    """Decimal (odds_up, odds_down) with the same margin on both sides."""
+    return quote_odds_two_sided(display_probability, margin, margin, net_delta_imbalance, parameters)
 
 
 def flat_book_odds(display_probability: np.ndarray, margin, parameters: MarketParameters):
@@ -277,6 +293,13 @@ class SimulationResult:
     per_bettor: dict
     net_delta_series: np.ndarray = field(repr=False)
     pnl_series: np.ndarray = field(repr=False)
+    hedge_pnl: float = 0.0
+    hedge_cost: float = 0.0
+
+    @property
+    def net_pnl(self) -> float:
+        """House PnL including the delta hedge and its cost."""
+        return self.house_pnl + self.hedge_pnl - self.hedge_cost
 
 
 def _house_profit(up, down, odds_up, odds_down, price_now, price_then) -> float:
@@ -287,18 +310,31 @@ def _house_profit(up, down, odds_up, odds_down, price_now, price_then) -> float:
     return 0.0  # a push refunds the stake
 
 
-def _margin_at(margin, t: int) -> float:
-    return float(margin) if np.isscalar(margin) else float(margin[t])
+def _scalar_at(value, t: int) -> float:
+    return float(value) if np.isscalar(value) else float(value[t])
+
+
+def _margins_at(margin, t: int):
+    """Return (margin_up, margin_down). `margin` is scalar/array (symmetric) or a (up, down) tuple."""
+    if isinstance(margin, tuple):
+        return _scalar_at(margin[0], t), _scalar_at(margin[1], t)
+    m = _scalar_at(margin, t)
+    return m, m
 
 
 def simulate(display_probability, margin, features: Features, bettors: dict,
              start_index: int, number_of_steps: int, parameters: MarketParameters,
-             seed: int = 42) -> SimulationResult:
+             seed: int = 42, hedge: bool = False) -> SimulationResult:
     """Run the live book for `number_of_steps` seconds from `start_index`.
 
     A bettor is `bettor(t, random_generator, odds_up, odds_down) -> (up_stake, down_stake)`.
     All bettors are filled at the same odds each second. Returns total house PnL/edge and each
     bettor's isolated PnL/edge.
+
+    `margin` is scalar/array (symmetric) or a (margin_up, margin_down) tuple (asymmetric). The
+    inventory skew responds to the *relative* imbalance (softened by `skew_softening`), so it
+    engages at any volume. If `hedge` is True, the house continuously offsets its net open notional
+    in the underlying at a cost of `hedge_cost_bps` per unit rebalanced (a simplified linear hedge).
     """
     horizon = parameters.horizon_seconds
     price = features.price
@@ -313,6 +349,7 @@ def simulate(display_probability, margin, features: Features, bettors: dict,
     bettor_down = {name: np.zeros(number_of_steps) for name in names}
 
     open_up = open_down = house_pnl = 0.0
+    hedge_position = hedge_pnl = hedge_cost = 0.0
     net_delta_series = np.empty(number_of_steps)
     pnl_series = np.empty(number_of_steps)
     refused_seconds = 0
@@ -320,6 +357,9 @@ def simulate(display_probability, margin, features: Features, bettors: dict,
 
     for step in range(number_of_steps):
         now = start_index + step
+
+        if hedge and step > 0:
+            hedge_pnl += hedge_position * (price[now] / price[now - 1] - 1.0)
 
         if step - horizon >= 0:
             settle_step = step - horizon
@@ -337,9 +377,10 @@ def simulate(display_probability, margin, features: Features, bettors: dict,
             open_up -= total_up[settle_step]
             open_down -= total_down[settle_step]
 
-        net_delta_imbalance = (open_up - open_down) / (open_up + open_down + parameters.maximum_net_delta)
-        odds_up, odds_down = quote_odds(display_probability[now], _margin_at(margin, now),
-                                        net_delta_imbalance, parameters)
+        net_delta_imbalance = (open_up - open_down) / (open_up + open_down + parameters.skew_softening)
+        margin_up, margin_down = _margins_at(margin, now)
+        odds_up, odds_down = quote_odds_two_sided(display_probability[now], margin_up, margin_down,
+                                                  net_delta_imbalance, parameters)
 
         this_up = {name: 0.0 for name in names}
         this_down = {name: 0.0 for name in names}
@@ -367,13 +408,19 @@ def simulate(display_probability, margin, features: Features, bettors: dict,
         net_delta_series[step] = open_up - open_down
         pnl_series[step] = house_pnl
 
+        if hedge:
+            target = open_up - open_down
+            hedge_cost += (parameters.hedge_cost_bps / 1e4) * abs(target - hedge_position)
+            hedge_position = target
+
     total_volume = total_up.sum() + total_down.sum()
     return SimulationResult(
         house_pnl=house_pnl, total_volume=total_volume,
         house_edge=house_pnl / total_volume if total_volume else 0.0,
         max_absolute_net_delta=float(np.abs(net_delta_series).max()),
         refused_seconds=refused_seconds, per_bettor=results,
-        net_delta_series=net_delta_series, pnl_series=pnl_series)
+        net_delta_series=net_delta_series, pnl_series=pnl_series,
+        hedge_pnl=hedge_pnl, hedge_cost=hedge_cost)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,6 +431,25 @@ def noise_pool(base_stake: float = 50.0, spread: float = 0.10):
     def bettor(t, random_generator, odds_up, odds_down):
         amount = base_stake * random_generator.exponential(1.0)
         up_fraction = float(np.clip(0.5 + random_generator.normal(0, spread), 0, 1))
+        return amount * up_fraction, amount * (1 - up_fraction)
+    return bettor
+
+
+def herding_pool(features: Features, base_stake: float = 50.0, herd_strength: float = 0.9,
+                 momentum_lookback: int = 30, tail_sigma: float = 0.8):
+    """Correlated, one-sided, fat-tailed retail flow (the opposite of the noise pool).
+
+    The crowd chases the recent move: when the price is rising it piles onto 'up', when falling onto
+    'down', so flow is heavily one-sided and persistent (correlated across seconds). Sizes are
+    fat-tailed (lognormal). This is the flow that actually stresses the book's inventory risk.
+    `herd_strength` in [0, 1] sets how lopsided the crowd is (0.9 means ~95%/5% on trending seconds).
+    """
+    price = features.price
+    def bettor(t, random_generator, odds_up, odds_down):
+        amount = base_stake * random_generator.lognormal(mean=0.0, sigma=tail_sigma)
+        trailing = price[t] - price[t - momentum_lookback]
+        lean = herd_strength * np.sign(trailing)
+        up_fraction = float(np.clip(0.5 + 0.5 * lean, 0.0, 1.0))
         return amount * up_fraction, amount * (1 - up_fraction)
     return bettor
 
@@ -669,3 +735,85 @@ def information_margin_over_display(hidden_probability, display_probability,
     required = np.maximum(np.maximum(up_side, down_side), 0.0)
     add_on = required + information_margin_buffer - parameters.house_margin
     return np.maximum(add_on, 0.0)
+
+
+def information_margin_sides(hidden_probability, display_probability, parameters: MarketParameters,
+                            information_margin_buffer: float = 0.02):
+    """Per-side information margin: charge each side only what that side's attacker needs.
+
+    Same break-even logic as `information_margin_over_display`, but kept separate for the up and the
+    down side, so we do not over-charge the side an informed bettor would not take. Returns
+    (up_add_on, down_add_on), each a per-second array to add to the base vig on that side.
+    """
+    p = np.clip(np.asarray(hidden_probability, dtype=float), _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
+    q = np.clip(np.asarray(display_probability, dtype=float), _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
+    up_required = np.maximum(1.0 - q / p, 0.0)
+    down_required = np.maximum(1.0 - (1.0 - q) / (1.0 - p), 0.0)
+    buffer_or_zero = lambda required: np.where(required > 0.0, required + information_margin_buffer, 0.0)
+    up_add_on = np.maximum(buffer_or_zero(up_required) - parameters.house_margin, 0.0)
+    down_add_on = np.maximum(buffer_or_zero(down_required) - parameters.house_margin, 0.0)
+    return up_add_on, down_add_on
+
+
+# --------------------------------------------------------------------------- #
+#  Risk metrics                                                               #
+# --------------------------------------------------------------------------- #
+def max_drawdown(cumulative_pnl: np.ndarray) -> float:
+    """Largest peak-to-trough drop of a cumulative PnL path."""
+    running_max = np.maximum.accumulate(cumulative_pnl)
+    return float((running_max - cumulative_pnl).max())
+
+
+def value_at_risk(settled_pnl: np.ndarray, level: float = 0.99) -> float:
+    """Loss (positive number) not exceeded with probability `level`."""
+    return float(-np.quantile(settled_pnl, 1.0 - level))
+
+
+def expected_shortfall(settled_pnl: np.ndarray, level: float = 0.99) -> float:
+    """Average loss (positive number) in the worst `1 - level` tail."""
+    threshold = np.quantile(settled_pnl, 1.0 - level)
+    tail = settled_pnl[settled_pnl <= threshold]
+    return float(-tail.mean()) if len(tail) else 0.0
+
+
+def settled_pnl_series(result: SimulationResult) -> np.ndarray:
+    """Per-second change in house PnL (i.e. each second's settled profit/loss)."""
+    return np.diff(result.pnl_series, prepend=0.0)
+
+
+# --------------------------------------------------------------------------- #
+#  Oracle data-quality helpers                                                #
+# --------------------------------------------------------------------------- #
+def carry_forward_prices(interpolated_prices: np.ndarray, real_mask: np.ndarray) -> np.ndarray:
+    """Grid prices using last-print carry-forward (what a live oracle does), no interpolation.
+
+    On real-print seconds the interpolated grid already equals the true print; setting the rest to
+    NaN and forward-filling reproduces the causal, non-interpolated series a live system would see.
+    """
+    carried = interpolated_prices.astype(float).copy()
+    carried[~real_mask] = np.nan
+    return pd.Series(carried).ffill().bfill().values
+
+
+# --------------------------------------------------------------------------- #
+#  Calibration diagnostics                                                     #
+# --------------------------------------------------------------------------- #
+def log_loss(probabilities: np.ndarray, outcomes: np.ndarray) -> float:
+    """Mean binary cross-entropy of `probabilities` against 0/1 `outcomes`."""
+    p = np.clip(probabilities, 1e-6, 1.0 - 1e-6)
+    return float(-(outcomes * np.log(p) + (1.0 - outcomes) * np.log(1.0 - p)).mean())
+
+
+def reliability_curve(probabilities: np.ndarray, outcomes: np.ndarray, number_of_bins: int = 10):
+    """Return (mean_predicted, mean_realized, count) per probability bin, for a reliability diagram."""
+    edges = np.linspace(probabilities.min(), probabilities.max(), number_of_bins + 1)
+    bin_index = np.clip(np.digitize(probabilities, edges) - 1, 0, number_of_bins - 1)
+    mean_predicted, mean_realized, count = [], [], []
+    for b in range(number_of_bins):
+        in_bin = bin_index == b
+        if in_bin.sum() == 0:
+            continue
+        mean_predicted.append(probabilities[in_bin].mean())
+        mean_realized.append(outcomes[in_bin].mean())
+        count.append(int(in_bin.sum()))
+    return np.array(mean_predicted), np.array(mean_realized), np.array(count)
