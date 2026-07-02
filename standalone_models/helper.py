@@ -76,6 +76,26 @@ def load_prices(file_name: str = "btc_pyth_prices.parquet",
     return PriceSeries(price=price, log_price=np.log(price))
 
 
+def load_raw_prices(file_name: str = "btc_pyth_prices.parquet",
+                    search_paths=_DEFAULT_DATA_SEARCH_PATHS):
+    """Return the raw (timestamps, prices) before any interpolation, deduplicated and sorted.
+
+    Use this to audit how much of the 1-second grid `load_prices` interpolates: a grid second with
+    no real print gets a linear blend of the previous and the *next* print, which is forward-looking.
+    """
+    frame = pd.read_parquet(_resolve(file_name, search_paths))[["timestamp", "price"]].dropna()
+    frame = frame.drop_duplicates("timestamp", keep="last").sort_values("timestamp").reset_index(drop=True)
+    return frame.timestamp.values.astype(np.int64), frame.price.values.astype(float)
+
+
+def real_print_mask(timestamps: np.ndarray) -> np.ndarray:
+    """Boolean mask over the 1-second grid: True where a grid second has a real print.
+
+    Aligned index-for-index with the arrays from `build_features` (both use grid = first..last)."""
+    grid = np.arange(timestamps[0], timestamps[-1] + 1)
+    return np.isin(grid, timestamps)
+
+
 def load_fast_feed(file_name: str = "binance_btcusdt_1s_aligned.parquet",
                    column: str = "binance_close", expected_length: int | None = None,
                    search_paths=_DEFAULT_DATA_SEARCH_PATHS) -> PriceSeries:
