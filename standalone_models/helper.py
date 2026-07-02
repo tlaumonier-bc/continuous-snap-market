@@ -97,14 +97,44 @@ class Features:
     per_second_volatility: np.ndarray
     annualized_volatility: np.ndarray
     standardized_momentum: np.ndarray
+    # Extra features used only by the logistic estimate (the guarded model). The
+    # volatility-regime momentum model uses only the fields above.
+    absolute_standardized_momentum: np.ndarray = None
+    momentum_2_seconds: np.ndarray = None
+    momentum_5_seconds: np.ndarray = None
+    momentum_15_seconds: np.ndarray = None
+    momentum_30_seconds: np.ndarray = None
+    momentum_60_seconds: np.ndarray = None
+    position_in_range_60_seconds: np.ndarray = None
+    position_in_range_120_seconds: np.ndarray = None
+    path_efficiency_30_seconds: np.ndarray = None
+    acceleration: np.ndarray = None
 
     @property
     def number_of_seconds(self) -> int:
         return len(self.price)
 
 
+def _momentum_over(log_price, window_seconds, number_of_seconds):
+    out = np.full(number_of_seconds, np.nan)
+    out[window_seconds:] = log_price[window_seconds:] - log_price[:-window_seconds]
+    return out
+
+
+def _position_in_recent_range(price, window_seconds):
+    series = pd.Series(price)
+    highest = series.rolling(window_seconds, min_periods=window_seconds).max().values
+    lowest = series.rolling(window_seconds, min_periods=window_seconds).min().values
+    span = highest - lowest
+    return np.where(span > 0, (price - lowest) / span, 0.5)
+
+
 def build_features(prices: PriceSeries, parameters: MarketParameters) -> Features:
-    """Per-second momentum and volatility, computed once and shared by everything."""
+    """Per-second momentum and volatility, computed once and shared by everything.
+
+    The first block (volatility and standardized momentum) is all the volatility-regime model
+    needs; the rest are extra features the guarded model's logistic estimate uses.
+    """
     log_price = prices.log_price
     number_of_seconds = prices.number_of_seconds
     lookback = parameters.momentum_lookback_seconds
@@ -120,10 +150,29 @@ def build_features(prices: PriceSeries, parameters: MarketParameters) -> Feature
         (log_price[lookback:] - log_price[:-lookback])
         / (per_second_volatility[lookback:] * np.sqrt(lookback))
     )
+
+    momentum_2 = _momentum_over(log_price, 2, number_of_seconds)
+    momentum_5 = _momentum_over(log_price, 5, number_of_seconds)
+    momentum_15 = _momentum_over(log_price, 15, number_of_seconds)
+    momentum_30 = _momentum_over(log_price, 30, number_of_seconds)
+    momentum_60 = _momentum_over(log_price, 60, number_of_seconds)
+    absolute_log_return = np.abs(np.diff(log_price, prepend=log_price[0]))
+    gross_motion_30 = pd.Series(absolute_log_return).rolling(30, min_periods=30).sum().values
+    path_efficiency_30 = np.where(gross_motion_30 > 0, np.abs(momentum_30) / gross_motion_30, np.nan)
+    acceleration = momentum_2 - (momentum_5 - momentum_2)
+
     return Features(price=prices.price, log_price=log_price,
                     per_second_volatility=per_second_volatility,
                     annualized_volatility=annualized_volatility,
-                    standardized_momentum=standardized_momentum)
+                    standardized_momentum=standardized_momentum,
+                    absolute_standardized_momentum=np.abs(standardized_momentum),
+                    momentum_2_seconds=momentum_2, momentum_5_seconds=momentum_5,
+                    momentum_15_seconds=momentum_15, momentum_30_seconds=momentum_30,
+                    momentum_60_seconds=momentum_60,
+                    position_in_range_60_seconds=_position_in_recent_range(prices.price, 60),
+                    position_in_range_120_seconds=_position_in_recent_range(prices.price, 120),
+                    path_efficiency_30_seconds=path_efficiency_30,
+                    acceleration=acceleration)
 
 
 # --------------------------------------------------------------------------- #
@@ -345,9 +394,13 @@ def mean_reversion_fader(features: Features, lookback: int = 5, base_stake: floa
     return bettor
 
 
-def regime_aware_bettor(probability_up: np.ndarray, minimum_edge: float = 0.0,
-                        base_stake: float = 50.0, size: float = 1.0):
-    """Informed attacker: bets the positive expected-value side from a probability estimate."""
+def expected_value_bettor(probability_up: np.ndarray, minimum_edge: float = 0.0,
+                          base_stake: float = 50.0, size: float = 1.0):
+    """Informed attacker: bets the positive expected-value side from a probability estimate.
+
+    Feed it the regime-conditional signal for a 'regime-aware' attacker, or the logistic signal
+    for a 'predictive' attacker; the betting rule is the same, only the signal differs.
+    """
     def bettor(t, random_generator, odds_up, odds_down):
         amount = base_stake * size * random_generator.exponential(1.0)
         probability = probability_up[t]
@@ -359,6 +412,12 @@ def regime_aware_bettor(probability_up: np.ndarray, minimum_edge: float = 0.0,
             return 0.0, amount
         return 0.0, 0.0
     return bettor
+
+
+def regime_aware_bettor(probability_up: np.ndarray, minimum_edge: float = 0.0,
+                        base_stake: float = 50.0, size: float = 1.0):
+    """Alias of `expected_value_bettor`, read with the regime-conditional signal in mind."""
+    return expected_value_bettor(probability_up, minimum_edge, base_stake, size)
 
 
 def lead_lag_bettor(features: Features, fast_log_price: np.ndarray, gap_threshold: float = 0.0,
@@ -413,3 +472,180 @@ def regime_conditional_probability(features: Features, parameters: MarketParamet
     for (m, v), probability in cell_probability.items():
         probability_up[(momentum_bin == m) & (volatility_bin == v)] = probability
     return probability_up
+
+
+# --------------------------------------------------------------------------- #
+#  Volatility-regime momentum display (reused by the guarded model)           #
+# --------------------------------------------------------------------------- #
+def _calibrate_momentum_curve(training_momentum, training_outcomes, momentum_bin_count,
+                              minimum_samples_per_bin, monotone_passes, shrinkage):
+    edges = np.quantile(training_momentum, np.linspace(0, 1, momentum_bin_count + 1))
+    edges[0], edges[-1] = -np.inf, np.inf
+    bin_index = np.digitize(training_momentum, edges) - 1
+    probability = np.array([
+        training_outcomes[bin_index == b].mean() if (bin_index == b).sum() > minimum_samples_per_bin else 0.5
+        for b in range(momentum_bin_count)])
+    probability = pool_adjacent_violators(probability, monotone_passes)
+    return edges, 0.5 + shrinkage * (probability - 0.5)
+
+
+def build_volatility_regime_display(features: Features, parameters: MarketParameters,
+                                    volatility_regime_count: int = 3, momentum_bin_count: int = 25,
+                                    calibration_shrinkage: float = 0.40, minimum_samples_per_bin: int = 50,
+                                    monotone_passes: int = 200,
+                                    calibration_window_seconds: int = 90 * 86_400,
+                                    recompute_every_seconds: int = 7 * 86_400):
+    """Rolling per-regime momentum display. Returns (display_probability, first_evaluation_second).
+
+    This is the model built step by step in the volatility-regime momentum notebook; the guarded
+    model reuses it as its displayed direction.
+    """
+    momentum = features.standardized_momentum
+    volatility = features.annualized_volatility
+    entries = contract_entries(features.number_of_seconds, parameters)
+    outcomes = contract_outcomes(features, entries, parameters)
+    window_contracts = calibration_window_seconds // parameters.horizon_seconds
+    recompute_contracts = recompute_every_seconds // parameters.horizon_seconds
+
+    display_probability = np.full(features.number_of_seconds, 0.5)
+    first_evaluation_second = features.number_of_seconds
+
+    for start in range(window_contracts, len(entries), recompute_contracts):
+        training_slice = slice(start - window_contracts, start)
+        training_entries = entries[training_slice]
+        training_regime = quantile_bins(volatility[training_entries], volatility[training_entries],
+                                        volatility_regime_count)
+        curves = []
+        for r in range(volatility_regime_count):
+            mask = training_regime == r
+            curves.append(_calibrate_momentum_curve(
+                momentum[training_entries][mask], outcomes[training_slice][mask], momentum_bin_count,
+                minimum_samples_per_bin, monotone_passes, calibration_shrinkage)
+                if mask.sum() > minimum_samples_per_bin else None)
+
+        segment_start = int(entries[start])
+        next_start = min(len(entries), start + recompute_contracts)
+        segment_stop = int(entries[next_start]) if next_start < len(entries) else features.number_of_seconds
+        segment_regime = quantile_bins(volatility[segment_start:segment_stop],
+                                       volatility[training_entries], volatility_regime_count)
+        segment_momentum = momentum[segment_start:segment_stop]
+        segment_probability = np.full(segment_stop - segment_start, 0.5)
+        for r, curve in enumerate(curves):
+            if curve is None:
+                continue
+            in_regime = segment_regime == r
+            if in_regime.any():
+                edges, probability_per_bin = curve
+                index = np.clip(np.digitize(segment_momentum[in_regime], edges) - 1,
+                                0, len(probability_per_bin) - 1)
+                segment_probability[in_regime] = probability_per_bin[index]
+        display_probability[segment_start:segment_stop] = segment_probability
+        first_evaluation_second = min(first_evaluation_second, segment_start)
+
+    return display_probability, first_evaluation_second
+
+
+# --------------------------------------------------------------------------- #
+#  Hidden logistic estimate (the guard's information signal)                   #
+# --------------------------------------------------------------------------- #
+def logistic_feature_matrix(features: Features, index=slice(None)) -> np.ndarray:
+    """Feature matrix for the hidden logistic estimate (scaled for a stable optimiser)."""
+    return np.column_stack([
+        features.standardized_momentum[index],
+        features.absolute_standardized_momentum[index],
+        features.momentum_2_seconds[index] * 1e4,
+        features.momentum_5_seconds[index] * 1e4,
+        features.momentum_15_seconds[index] * 1e4,
+        features.momentum_30_seconds[index] * 1e4,
+        features.momentum_60_seconds[index] * 1e4,
+        features.annualized_volatility[index],
+        features.position_in_range_60_seconds[index],
+        features.position_in_range_120_seconds[index],
+        features.path_efficiency_30_seconds[index],
+        features.acceleration[index] * 1e4,
+    ]).astype(float)
+
+
+def _sigmoid(values):
+    return 1.0 / (1.0 + np.exp(-np.clip(values, -35.0, 35.0)))
+
+
+def _fit_logistic(training_features, training_outcomes, iterations, learning_rate,
+                  ridge_penalty, minimum_samples):
+    finite = np.isfinite(training_features).all(axis=1) & np.isfinite(training_outcomes)
+    x = training_features[finite]
+    y = training_outcomes[finite].astype(float)
+    if len(y) < minimum_samples or y.min() == y.max():
+        return None
+    mean = x.mean(axis=0)
+    scale = x.std(axis=0)
+    scale[scale < 1e-8] = 1.0
+    x = (x - mean) / scale
+    weights = np.zeros(x.shape[1] + 1)
+    for _ in range(iterations):
+        error = _sigmoid(weights[0] + x @ weights[1:]) - y
+        gradient = np.empty_like(weights)
+        gradient[0] = error.mean()
+        gradient[1:] = (x.T @ error) / len(y) + ridge_penalty * weights[1:]
+        weights -= learning_rate * gradient
+    return weights, mean, scale
+
+
+def _predict_logistic(feature_matrix, fitted, probability_clip):
+    if fitted is None:
+        return np.full(len(feature_matrix), 0.5)
+    weights, mean, scale = fitted
+    x = np.nan_to_num((feature_matrix - mean) / scale, nan=0.0, posinf=0.0, neginf=0.0)
+    probability = _sigmoid(weights[0] + x @ weights[1:])
+    return np.clip(probability, probability_clip, 1.0 - probability_clip)
+
+
+def build_walk_forward_logistic_probability(features: Features, parameters: MarketParameters,
+                                            minimum_training_contracts: int = 5_000,
+                                            training_window_contracts: int = 20_000,
+                                            retrain_contracts: int = 5_000, iterations: int = 40,
+                                            learning_rate: float = 0.08, ridge_penalty: float = 0.02,
+                                            probability_clip: float = 0.02, minimum_samples: int = 50,
+                                            chunk_size: int = 500_000) -> np.ndarray:
+    """Walk-forward logistic estimate of P(up) on many features (no look-ahead)."""
+    entries = contract_entries(features.number_of_seconds, parameters)
+    outcomes = contract_outcomes(features, entries, parameters)
+    probability_up = np.full(features.number_of_seconds, 0.5)
+    minimum = min(minimum_training_contracts, len(entries))
+    if minimum < minimum_samples:
+        return probability_up
+
+    window = max(minimum, training_window_contracts)
+    for start in range(minimum, len(entries), max(1, retrain_contracts)):
+        train_start = max(0, start - window)
+        train_entries = entries[train_start:start]
+        fitted = _fit_logistic(logistic_feature_matrix(features, train_entries),
+                               outcomes[train_start:start], iterations, learning_rate,
+                               ridge_penalty, minimum_samples)
+        segment_start = int(entries[start])
+        next_start = min(len(entries), start + max(1, retrain_contracts))
+        segment_stop = int(entries[next_start]) if next_start < len(entries) else features.number_of_seconds
+        for chunk_start in range(segment_start, segment_stop, chunk_size):
+            chunk_stop = min(segment_stop, chunk_start + chunk_size)
+            probability_up[chunk_start:chunk_stop] = _predict_logistic(
+                logistic_feature_matrix(features, slice(chunk_start, chunk_stop)), fitted, probability_clip)
+    return probability_up
+
+
+def information_margin_over_display(hidden_probability, display_probability,
+                                   parameters: MarketParameters,
+                                   information_margin_buffer: float = 0.02) -> np.ndarray:
+    """Extra symmetric margin so a bettor who knows `hidden_probability` is non-positive.
+
+    On a balanced book the up odds are (1 - margin) / display and the down odds are
+    (1 - margin) / (1 - display). A bettor with true probability p breaks even on the up side at
+    margin = 1 - display / p, and on the down side at margin = 1 - (1 - display) / (1 - p). We
+    charge the larger so neither side is positive, add a buffer, and subtract the vig already taken.
+    """
+    p = np.clip(np.asarray(hidden_probability, dtype=float), _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
+    q = np.clip(np.asarray(display_probability, dtype=float), _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
+    up_side = 1.0 - q / p
+    down_side = 1.0 - (1.0 - q) / (1.0 - p)
+    required = np.maximum(np.maximum(up_side, down_side), 0.0)
+    add_on = required + information_margin_buffer - parameters.house_margin
+    return np.maximum(add_on, 0.0)
